@@ -1,0 +1,92 @@
+# WILLAM Bot Configuration
+# Fresh forex/CFD bot - no legacy references
+
+bot:
+  name: "willam"
+  version: "1.0.0"
+  mode: "live"  # backtest, paper, live
+
+mt5:
+  enabled: true
+  path: ""  # Auto-detect MT5 terminal
+  login: 0  # Set your account number
+  password: ""  # Set your password
+  server: ""  # Set your broker server
+  timeout: 60000
+
+trading:
+  symbols:
+    - "EURUSD"
+    - "GBPUSD"
+    - "USDJPY"
+    - "AUDUSD"
+    - "USDCAD"
+    - "NZDUSD"
+    - "XAUUSD"
+    - "US30"
+  timeframe: "M15"
+  session_hours:
+    london_open: "08:00"
+    london_close: "17:00"
+    ny_open: "13:00"
+    ny_close: "22:00"
+    asian_open: "00:00"
+    asian_close: "09:00"
+  timezone: "UTC"
+
+news:
+  check_interval_minutes: 15
+  lookahead_hours: 1
+  high_impact_only: true
+  sources:
+    - "forexfactory"
+    - "investing.com"
+    - "dailyfx"
+  pause_before_minutes: 60
+  wait_after_minutes: 30
+  confirmation_wait_minutes: 15
+
+risk:
+  default_risk_percent: 1.0
+  max_risk_percent: 2.0
+  max_daily_drawdown: 5.0
+  max_positions_per_symbol: 1
+  max_total_positions: 5
+  risk_reward_ratio: 2.0
+  atr_multiplier_sl: 1.5
+  atr_multiplier_tp: 3.0
+  use_atr_stops: true
+
+strategy:
+  min_winrate: 55.0
+  min_trades_for_validation: 100
+  lookback_days: 365
+  reoptimize_interval_days: 30
+  walk_forward_window: 90
+
+evolution:
+  enabled: true
+  learning_rate: 0.1
+  memory_window_trades: 500
+  gap_analysis_enabled: true
+  survival_threshold: 0.5  # Must maintain >50% expectancy
+  generations_before_review: 50
+
+jev:
+  model: "nemotron-3-ultra"
+  fallback_model: "free-llm-api"
+  confidence_threshold: 0.7
+  max_reasoning_steps: 5
+
+logging:
+  level: "INFO"
+  trade_log_path: "logs/trades/"
+  backtest_log_path: "backtest/"
+  evolution_log_path: "evolution/"
+  error_log_path: "logs/errors/"
+
+backtest:
+  engine: "vectorbt"
+  commission: 0.00007  # 0.7 pips
+  slippage: 0.00003
+  spread_multiplier: 1.2
