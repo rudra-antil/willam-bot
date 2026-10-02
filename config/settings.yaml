@@ -71,6 +71,14 @@ evolution:
   gap_analysis_enabled: true
   survival_threshold: 0.5  # Must maintain >50% expectancy
   generations_before_review: 50
+  
+  # Psychological Learning Parameters
+  loss_learning_multiplier: 3.0      # Learn 3x more from losses than wins
+  frustration_threshold: 3           # Consecutive losses before deep dive analysis
+  curiosity_growth_rate: 0.05        # Curiosity grows with each trade
+  max_frustration: 1.0               # Maximum frustration level (0-1)
+  solution_test_trades: 20           # Trades to validate a solution
+  profit_per_trade_target: 0.001     # Target expectancy per trade (0.1%)
 
 jev:
   model: "nemotron-3-ultra"
