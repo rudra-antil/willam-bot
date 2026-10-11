@@ -1,0 +1,22 @@
+# Secrets
+.env
+
+# Runtime state (per-installation, not source)
+evolution/*.json
+backtest/*.pkl
+backtest/backtest_*.json
+logs/
+jev/decisions/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

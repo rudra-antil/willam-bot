@@ -9,7 +9,7 @@ import asyncio
 import json
 import numpy as np
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
@@ -73,7 +73,7 @@ class LosingPattern:
     
     # Status
     status: str = "active"  # "active", "solved", "monitoring", "archived"
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     solved_at: Optional[str] = None
 
 
@@ -145,7 +145,7 @@ class EvolutionEngine:
         
         # NEW: Daily learning journal
         self.daily_learning: Dict[str, Dict] = {}  # date -> {trades, lessons, improvements, frustration, curiosity}
-        self.current_day = datetime.utcnow().date().isoformat()
+        self.current_day = datetime.now(timezone.utc).date().isoformat()
         
         # NEW: Curiosity engine
         self.curiosity_questions: List[Dict] = []  # Questions the bot asks itself
@@ -193,7 +193,7 @@ class EvolutionEngine:
                     self.curiosity_questions = data.get("questions", [])
                     self.exploration_queue = data.get("explorations", [])
             
-            self.current_day = datetime.utcnow().date().isoformat()
+            self.current_day = datetime.now(timezone.utc).date().isoformat()
             self._init_daily_learning()
             
             print(f"EVOLUTION: Memory loaded - {len(self.trade_memory)} trades, "
@@ -222,6 +222,21 @@ class EvolutionEngine:
                 "profit_per_trade": 0.0,
             }
     
+    @staticmethod
+    def _safe_duration_minutes(open_time) -> float:
+        """Minutes since open — tolerant of naive/aware datetimes and strings."""
+        try:
+            if isinstance(open_time, str):
+                ot = datetime.fromisoformat(open_time.replace("Z", "+00:00"))
+            else:
+                ot = open_time
+            now = datetime.now(timezone.utc)
+            if ot.tzinfo is None:
+                ot = ot.replace(tzinfo=timezone.utc)
+            return (now - ot).total_seconds() / 60
+        except Exception:
+            return 0.0
+
     def _get_curiosity_level(self) -> float:
         """Calculate current curiosity level based on knowledge and unsolved problems."""
         base = 1.0
@@ -237,7 +252,7 @@ class EvolutionEngine:
             with open(self.memory_path, "w") as f:
                 json.dump({
                     "trades": [asdict(t) for t in self.trade_memory[-self.memory_window:]],
-                    "saved_at": datetime.utcnow().isoformat()
+                    "saved_at": datetime.now(timezone.utc).isoformat()
                 }, f, indent=2)
             
             # Save performance
@@ -264,7 +279,7 @@ class EvolutionEngine:
                     "questions": self.curiosity_questions[-100:],
                     "explorations": self.exploration_queue[-50:],
                     "curiosity_level": self._get_curiosity_level(),
-                    "saved_at": datetime.utcnow().isoformat()
+                    "saved_at": datetime.now(timezone.utc).isoformat()
                 }, f, indent=2)
                 
         except Exception as e:
@@ -290,8 +305,10 @@ class EvolutionEngine:
         # This would ideally pull from market data at entry time
         # For now, infer from timestamp
         try:
-            entry_time = datetime.fromisoformat(position.open_time.replace('Z', '+00:00'))
-            hour = entry_time.hour
+            if isinstance(position.open_time, datetime):
+                hour = position.open_time.hour
+            else:
+                hour = datetime.fromisoformat(str(position.open_time).replace('Z', '+00:00')).hour
             
             if 0 <= hour < 8:
                 session = "asian"
@@ -323,7 +340,7 @@ class EvolutionEngine:
             return
         
         # Check day rollover
-        today = datetime.utcnow().date().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
         if today != self.current_day:
             await self._finalize_day()
             self.current_day = today
@@ -348,9 +365,9 @@ class EvolutionEngine:
             strategy_name=position.strategy_name,
             pnl=pnl,
             close_reason=close_reason,
-            duration_minutes=(datetime.utcnow() - position.open_time).total_seconds() / 60,
-            timestamp=datetime.utcnow().isoformat(),
-            news_context=position.news_context if hasattr(position, 'news_context') else None,
+            duration_minutes=self._safe_duration_minutes(position.open_time),
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            news_context=getattr(position, "news_context", None),
             setup_fingerprint=fingerprint,
             market_regime=market_context.get("regime", "unknown"),
             session=market_context.get("session", "unknown"),
@@ -397,7 +414,7 @@ class EvolutionEngine:
             self.strategy_performance[key] = StrategyPerformance(
                 name=strategy, symbol=symbol, total_trades=0, wins=0, losses=0,
                 winrate=0.0, expectancy=0.0, profit_factor=0.0, avg_win=0.0, avg_loss=0.0,
-                max_drawdown=0.0, sharpe=0.0, last_updated=datetime.utcnow().isoformat(),
+                max_drawdown=0.0, sharpe=0.0, last_updated=datetime.now(timezone.utc).isoformat(),
                 loss_aversion_weight=self.loss_learning_multiplier
             )
         
@@ -445,7 +462,7 @@ class EvolutionEngine:
             if len(perf.improvement_trajectory) > 30:
                 perf.improvement_trajectory = perf.improvement_trajectory[-30:]
         
-        perf.last_updated = datetime.utcnow().isoformat()
+        perf.last_updated = datetime.now(timezone.utc).isoformat()
     
     async def _process_loss(self, position: Any, record: TradeRecord, fingerprint: str, 
                            market_context: Dict, pnl: float, close_reason: str):
@@ -527,7 +544,7 @@ class EvolutionEngine:
                 pattern.solution_effectiveness = (pattern.solution_effectiveness * 0.7) + 0.3
                 if pattern.solution_effectiveness > 0.7 and pattern.occurrences >= 5:
                     pattern.status = "solved"
-                    pattern.solved_at = datetime.utcnow().isoformat()
+                    pattern.solved_at = datetime.now(timezone.utc).isoformat()
                     print(f"EVOLUTION: ✅ PATTERN SOLVED: {pattern_key} via {pattern.current_solution}")
                     self.daily_learning[self.current_day]["lessons_learned"].append({
                         "type": "pattern_solved",
@@ -556,21 +573,21 @@ class EvolutionEngine:
                 "question": f"Why does {pattern.strategy} fail on {pattern.symbol} in {pattern.session} session?",
                 "type": "root_cause",
                 "priority": "high",
-                "created": datetime.utcnow().isoformat()
+                "created": datetime.now(timezone.utc).isoformat()
             },
             {
                 "pattern": pattern_key,
                 "question": f"What market condition (volatility, spread, regime) makes this setup fail?",
                 "type": "condition_analysis",
                 "priority": "high",
-                "created": datetime.utcnow().isoformat()
+                "created": datetime.now(timezone.utc).isoformat()
             },
             {
                 "pattern": pattern_key,
                 "question": f"Should we add a filter, change SL/TP, or abandon this setup entirely?",
                 "type": "solution_design",
                 "priority": "critical",
-                "created": datetime.utcnow().isoformat()
+                "created": datetime.now(timezone.utc).isoformat()
             },
         ]
         self.curiosity_questions.extend(questions)
@@ -641,7 +658,7 @@ class EvolutionEngine:
         # Store solutions for testing
         for sol in solutions:
             sol["pattern_id"] = pattern.pattern_id
-            sol["proposed_at"] = datetime.utcnow().isoformat()
+            sol["proposed_at"] = datetime.now(timezone.utc).isoformat()
             sol["status"] = "proposed"
             self.pattern_solutions[pattern.pattern_id].append(sol)
             self.exploration_queue.append(sol)
@@ -674,7 +691,7 @@ class EvolutionEngine:
                 "question": q,
                 "type": "loss_analysis" if is_loss else "win_analysis",
                 "priority": "high" if is_loss else "medium",
-                "created": datetime.utcnow().isoformat()
+                "created": datetime.now(timezone.utc).isoformat()
             })
         
         # Curiosity grows with every trade
@@ -730,7 +747,7 @@ class EvolutionEngine:
         sessions = {"asian": (0, 8), "london": (8, 16), "ny": (13, 21), "overlap": (12, 16)}
         
         for session_name, (start, end) in sessions.items():
-            session_trades = [t for t in trades if start <= datetime.fromisoformat(t.timestamp).hour < end]
+            session_trades = [t for t in trades if start <= datetime.fromisoformat(str(t.timestamp).replace('Z', '+00:00')).hour < end]
             if len(session_trades) >= 8:
                 winrate = sum(1 for t in session_trades if t.pnl > 0) / len(session_trades) * 100
                 expectancy = np.mean([t.pnl for t in session_trades])
@@ -778,7 +795,7 @@ class EvolutionEngine:
                 if sol.get("status") == "proposed":
                     # Mark as testing
                     sol["status"] = "testing"
-                    sol["test_start"] = datetime.utcnow().isoformat()
+                    sol["test_start"] = datetime.now(timezone.utc).isoformat()
                     sol["test_trades"] = 0
                     sol["test_pnl"] = 0.0
                     print(f"EVOLUTION: 🧪 TESTING SOLUTION: {sol['description']} for {pattern_id}")
@@ -802,7 +819,7 @@ class EvolutionEngine:
                                 "symbol": symbol,
                                 "hypothesis": f"Can we improve {strat_name} on {symbol} by adjusting parameters?",
                                 "priority": "medium",
-                                "created": datetime.utcnow().isoformat()
+                                "created": datetime.now(timezone.utc).isoformat()
                             })
     
     async def _update_daily_improvement_score(self):

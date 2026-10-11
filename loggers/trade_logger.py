@@ -5,7 +5,7 @@ Logs all trades to CSV/JSON with pair and strategy separation
 
 import csv
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, asdict
@@ -69,6 +69,21 @@ class TradeLogger:
         self.csv_writers: Dict[str, csv.writer] = {}
         self.csv_headers_written: Dict[str, bool] = {}
     
+    @staticmethod
+    def _safe_duration_minutes(open_time) -> float:
+        """Minutes since open — tolerant of naive/aware datetimes and strings."""
+        try:
+            if isinstance(open_time, str):
+                ot = datetime.fromisoformat(open_time.replace("Z", "+00:00"))
+            else:
+                ot = open_time
+            now = datetime.now(timezone.utc)
+            if ot.tzinfo is None:
+                ot = ot.replace(tzinfo=timezone.utc)
+            return (now - ot).total_seconds() / 60
+        except Exception:
+            return 0.0
+
     def log_open(self, position: Any, signal: Any):
         """Log an opened trade."""
         log = OpenTradeLog(
@@ -106,8 +121,8 @@ class TradeLogger:
             lot_size=position.lot_size,
             strategy_name=position.strategy_name,
             open_time=open_log.open_time,
-            close_time=datetime.utcnow().isoformat(),
-            duration_minutes=(datetime.utcnow() - position.open_time).total_seconds() / 60,
+            close_time=datetime.now(timezone.utc).isoformat(),
+            duration_minutes=self._safe_duration_minutes(position.open_time),
             pnl=pnl,
             close_reason=close_reason,
             confidence=open_log.confidence,
@@ -200,7 +215,7 @@ class TradeLogger:
             "avg_trade": result.avg_trade,
             "sharpe": result.sharpe,
             "parameters": result.parameters,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "equity_curve": result.equity_curve[-1000:] if result.equity_curve else []
         }
         

@@ -248,8 +248,8 @@ class StrategyManager:
         except:
             entry = data["Close"].iloc[-1]
         
-        # Create signal object
-        from main import TradeSignal
+        # Create signal object (shared dataclass — no circular import)
+        from signals import TradeSignal
         return TradeSignal(
             symbol=symbol,
             direction=direction,

@@ -1,14 +1,30 @@
 """
-Risk Manager Module for WILLAM
-Handles position sizing, stop loss, take profit, and risk limits
+Risk Manager Module for WILLAM — v2
+Handles position sizing, stop loss, take profit, and risk limits.
+
+v2 fixes:
+- timedelta imported properly (was at file bottom).
+- None-safe account reads (MT5 disconnect no longer crashes the loop).
+- estimate_pnl() fallback for symbols where deal history is unavailable.
+- Spread sanity check before allowing new entries.
 """
 
 import asyncio
+import logging
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
-from datetime import datetime
-import MetaTrader5 as mt5
+
 import numpy as np
+
+try:
+    import MetaTrader5 as mt5
+    MT5_AVAILABLE = True
+except ImportError:
+    MT5_AVAILABLE = False
+    mt5 = None
+
+logger = logging.getLogger("willam.risk")
 
 
 @dataclass
@@ -29,7 +45,7 @@ class RiskManager:
         self.config = config
         self.risk_config = config.get("risk", {})
         self.trading_config = config.get("trading", {})
-        
+
         self.params = RiskParams(
             risk_percent=self.risk_config.get("default_risk_percent", 1.0),
             max_risk_percent=self.risk_config.get("max_risk_percent", 2.0),
@@ -39,184 +55,172 @@ class RiskManager:
             risk_reward_ratio=self.risk_config.get("risk_reward_ratio", 2.0),
             atr_multiplier_sl=self.risk_config.get("atr_multiplier_sl", 1.5),
             atr_multiplier_tp=self.risk_config.get("atr_multiplier_tp", 3.0),
-            use_atr_stops=self.risk_config.get("use_atr_stops", True)
+            use_atr_stops=self.risk_config.get("use_atr_stops", True),
         )
-        
+
         self.daily_pnl = 0.0
-        self.daily_reset_time = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    
+        self.daily_reset_time = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        self._halted_for_today = False
+
+    # ------------------------------------------------------------------
+    # SL / TP / lots
+    # ------------------------------------------------------------------
+
     def calculate_levels(self, symbol: str, direction: str, entry_price: float, timeframe: str) -> tuple:
-        """
-        Calculate stop loss, take profit, and lot size for a trade.
-        Returns: (sl, tp, lot_size)
-        """
-        # Get symbol info
+        """Returns (sl, tp, lot_size)."""
+        if not MT5_AVAILABLE:
+            raise RuntimeError("MT5 unavailable")
         info = mt5.symbol_info(symbol)
         if not info:
             raise ValueError(f"Symbol {symbol} not found")
-        
-        # Get ATR for volatility-based stops
+
         atr = self._get_atr(symbol, timeframe)
-        
-        # Calculate SL distance
+
         if self.params.use_atr_stops and atr > 0:
             sl_distance = atr * self.params.atr_multiplier_sl
         else:
-            # Fallback: fixed pip distance
-            sl_distance = info.point * 200  # 200 points default
-        
-        # Ensure minimum distance (broker stop level)
+            sl_distance = info.point * 200
+
         min_dist = info.trade_stops_level * info.point
         if sl_distance < min_dist:
-            sl_distance = min_dist * 1.5
-        
-        # Calculate SL and TP
+            sl_distance = max(min_dist * 1.5, info.point * 10)
+
         if direction == "buy":
             sl = entry_price - sl_distance
-            tp_distance = sl_distance * self.params.risk_reward_ratio
-            tp = entry_price + tp_distance
+            tp = entry_price + sl_distance * self.params.risk_reward_ratio
         else:
             sl = entry_price + sl_distance
-            tp_distance = sl_distance * self.params.risk_reward_ratio
-            tp = entry_price - tp_distance
-        
-        # Normalize to symbol digits
+            tp = entry_price - sl_distance * self.params.risk_reward_ratio
+
         sl = round(sl, info.digits)
         tp = round(tp, info.digits)
-        
-        # Calculate lot size based on risk
+
         lot_size = self._calculate_lot_size(symbol, entry_price, sl)
-        
         return sl, tp, lot_size
-    
+
     def _get_atr(self, symbol: str, timeframe: str, period: int = 14) -> float:
-        """Get ATR value from MT5."""
+        if not MT5_AVAILABLE:
+            return 0.0
         try:
             timeframe_map = {
-                "M1": mt5.TIMEFRAME_M1,
-                "M5": mt5.TIMEFRAME_M5,
-                "M15": mt5.TIMEFRAME_M15,
-                "H1": mt5.TIMEFRAME_H1,
-                "H4": mt5.TIMEFRAME_H4,
-                "D1": mt5.TIMEFRAME_D1,
+                "M1": mt5.TIMEFRAME_M1, "M5": mt5.TIMEFRAME_M5, "M15": mt5.TIMEFRAME_M15,
+                "H1": mt5.TIMEFRAME_H1, "H4": mt5.TIMEFRAME_H4, "D1": mt5.TIMEFRAME_D1,
             }
-            
             tf = timeframe_map.get(timeframe, mt5.TIMEFRAME_M15)
             rates = mt5.copy_rates_from_pos(symbol, tf, 0, period + 10)
-            
             if rates is None or len(rates) < period:
                 return 0.0
-            
+
             import pandas as pd
             df = pd.DataFrame(rates)
-            
             high_low = df["high"] - df["low"]
             high_close = (df["high"] - df["close"].shift()).abs()
             low_close = (df["low"] - df["close"].shift()).abs()
-            
             tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
             atr = tr.rolling(period).mean().iloc[-1]
-            
             return float(atr) if not np.isnan(atr) else 0.0
-        except:
+        except Exception:
             return 0.0
-    
+
     def _calculate_lot_size(self, symbol: str, entry_price: float, sl: float) -> float:
-        """Calculate lot size based on account risk percentage."""
+        if not MT5_AVAILABLE:
+            return 0.01
         account = mt5.account_info()
         if not account:
+            logger.warning("account_info() None during lot sizing — defaulting to min lot")
             return 0.01
-        
+
         balance = account.balance
         risk_amount = balance * (self.params.risk_percent / 100)
-        
-        # Get symbol info for pip value
+
         info = mt5.symbol_info(symbol)
-        if not info:
+        if not info or info.trade_tick_value == 0 or info.trade_tick_size == 0 or info.point == 0:
             return 0.01
-        
-        # Calculate pip value per lot
-        # For forex: 1 lot = 100,000 units, 1 pip = 10 units of quote currency
-        # Need to convert to account currency
-        tick = mt5.symbol_info_tick(symbol)
-        if not tick:
-            return 0.01
-        
-        # Simplified: assume USD account, major pairs
-        # Proper implementation would use mt5.symbol_info(symbol).trade_tick_value
-        tick_value = info.trade_tick_value
-        tick_size = info.trade_tick_size
-        
-        if tick_value == 0 or tick_size == 0:
-            return 0.01
-        
-        # Points difference
+
         points_diff = abs(entry_price - sl) / info.point
-        
-        # Value per lot for this SL distance
-        value_per_lot = points_diff * tick_value
-        
+        value_per_lot = points_diff * info.trade_tick_value
         if value_per_lot <= 0:
             return 0.01
-        
-        # Calculate lots
+
         lots = risk_amount / value_per_lot
-        
-        # Round to step
-        step = info.volume_step
+
+        step = info.volume_step or 0.01
         lots = round(lots / step) * step
-        
-        # Clamp to min/max
+
         lots = max(info.volume_min, min(lots, info.volume_max))
-        
-        # Additional safety: cap at max risk percent
+
+        # Cap at max risk percent
         max_risk_amount = balance * (self.params.max_risk_percent / 100)
-        max_lots = max_risk_amount / value_per_lot if value_per_lot > 0 else info.volume_min
+        max_lots = max_risk_amount / value_per_lot
         lots = min(lots, max_lots)
-        
-        return round(lots, 2)
-    
+
+        # Clamp again after capping (step alignment)
+        lots = max(info.volume_min, min(lots, info.volume_max))
+        lots = round(lots / step) * step
+        return max(lots, info.volume_min)
+
+    # ------------------------------------------------------------------
+    # Permissions
+    # ------------------------------------------------------------------
+
     def can_open_position(self, symbol: str, positions: Dict) -> bool:
-        """Check if we can open a new position based on risk limits."""
-        # Check daily drawdown
-        self._check_daily_reset()
-        if self.daily_pnl <= -abs(self.params.max_daily_drawdown / 100 * mt5.account_info().balance):
+        if not MT5_AVAILABLE:
             return False
-        
-        # Count positions for this symbol
+        self._check_daily_reset()
+        account = mt5.account_info()
+        if not account:
+            logger.warning("account_info() None — refusing new positions")
+            return False
+
+        # Daily drawdown halt (sticky for the rest of the UTC day)
+        dd_limit = abs(self.params.max_daily_drawdown / 100 * account.balance)
+        if self._halted_for_today or self.daily_pnl <= -dd_limit:
+            if not self._halted_for_today:
+                logger.warning(f"DAILY DRAWDOWN LIMIT HIT ({self.daily_pnl:.2f} <= -{dd_limit:.2f}) — halting for the day")
+                self._halted_for_today = True
+            return False
+
+        # Per-symbol cap
         symbol_positions = sum(1 for p in positions.values() if p.symbol == symbol)
         if symbol_positions >= self.params.max_positions_per_symbol:
             return False
-        
-        # Check total positions
+
+        # Total cap
         if len(positions) >= self.params.max_total_positions:
             return False
-        
-        # Check margin
-        account = mt5.account_info()
-        if account and account.margin_free < account.margin * 0.5:  # Less than 50% free margin
+
+        # Spread sanity — refuse entries at blown-out spreads
+        info = mt5.symbol_info(symbol)
+        tick = mt5.symbol_info_tick(symbol)
+        if info and tick and info.point and info.spread:
+            spread = (tick.ask - tick.bid) / info.point
+            if spread > max(info.spread * 3, 30):  # spread 3x average or >30 points
+                logger.info(f"Spread too wide on {symbol}: {spread:.1f}")
+                return False
+
+        # Margin
+        if account.margin_free < account.margin * 0.5:
             return False
-        
+
         return True
-    
+
     def _check_daily_reset(self):
-        """Reset daily PnL at midnight UTC."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if now >= self.daily_reset_time + timedelta(days=1):
             self.daily_pnl = 0.0
+            self._halted_for_today = False
             self.daily_reset_time = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    
+
     def update_daily_pnl(self, pnl: float):
-        """Update daily PnL tracker."""
         self._check_daily_reset()
         self.daily_pnl += pnl
-    
+
     def get_account_risk_status(self) -> Dict:
-        """Get current risk status."""
+        if not MT5_AVAILABLE:
+            return {}
         account = mt5.account_info()
         if not account:
             return {}
-        
         return {
             "balance": account.balance,
             "equity": account.equity,
@@ -225,37 +229,43 @@ class RiskManager:
             "margin_level": account.margin_level,
             "daily_pnl": self.daily_pnl,
             "daily_pnl_percent": (self.daily_pnl / account.balance * 100) if account.balance > 0 else 0,
+            "halted_for_today": self._halted_for_today,
             "max_daily_drawdown": self.params.max_daily_drawdown,
             "open_positions": len(mt5.positions_get() or []),
-            "max_positions": self.params.max_total_positions
+            "max_positions": self.params.max_total_positions,
         }
-    
+
+    # ------------------------------------------------------------------
+    # PnL fallback + signal validation
+    # ------------------------------------------------------------------
+
+    def estimate_pnl(self, pos: Any, close_price: float) -> float:
+        """
+        Tick-value based PnL estimate, correct for ANY symbol class
+        (JPY pairs, gold, indices) — used only when deal history is unavailable.
+        """
+        if not MT5_AVAILABLE:
+            return 0.0
+        info = mt5.symbol_info(pos.symbol)
+        if not info or info.trade_tick_size == 0 or info.trade_tick_value == 0:
+            return 0.0
+        ticks = abs(close_price - pos.entry_price) / info.trade_tick_size
+        gross = ticks * info.trade_tick_value * pos.lot_size
+        return gross if pos.direction == "buy" else -gross
+
     def validate_signal(self, signal: Any, positions: Dict) -> bool:
-        """Validate a trade signal against risk rules."""
-        # Check if we can open position
         if not self.can_open_position(signal.symbol, positions):
             return False
-        
-        # Check signal has valid SL/TP
         if signal.sl <= 0 or signal.tp <= 0:
             return False
-        
-        # Check risk/reward
         if signal.direction == "buy":
             risk = signal.entry_price - signal.sl
             reward = signal.tp - signal.entry_price
         else:
             risk = signal.sl - signal.entry_price
             reward = signal.entry_price - signal.tp
-        
         if risk <= 0:
             return False
-        
-        actual_rr = reward / risk
-        if actual_rr < self.params.risk_reward_ratio * 0.8:  # Allow 20% tolerance
+        if reward / risk < self.params.risk_reward_ratio * 0.8:
             return False
-        
         return True
-
-
-from datetime import timedelta

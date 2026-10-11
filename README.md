@@ -4,6 +4,23 @@
 
 A fully autonomous forex/CFD trading bot with news-aware strategy execution, risk management, and continuous evolution.
 
+## v2 — what was broken and is now fixed
+
+| Was | Now |
+|-----|-----|
+| JEV was static if/else while config claimed an LLM | Real LLM decisions via **NVIDIA nemotron → FreeLLMAPI → rules** fallback chain |
+| Circular import (`from main import TradeSignal`) crashed startup | Shared `signals.py` — no cycles |
+| Waiting for one pair's news **blocked every other pair** | **Per-symbol news windows** — the bot keeps trading all other pairs |
+| PnL used `(close-entry) × lot × 100000` — wrong for JPY/XAU/US30 | PnL read from the actual MT5 closing **deal** (profit + swap + commission) |
+| News never loaded (`+4h` guess + wrong JSON schema) | Correct ISO-8601 parse, **DST-aware** via `zoneinfo`, verified against the live feed |
+| Hardcoded `ORDER_FILLING_IOC` → retcode 10030 on many brokers | Broker-adaptive filling mode, **self-healing on 10030** |
+| `position.open_time.replace(...)` crashed on first trade | Timezone-safe duration helpers everywhere |
+| JEV decisions discarded on exit | Persisted to `jev/decisions/decisions_YYYYMMDD.json` each cycle |
+| Risk manager crashed on MT5 disconnect | None-safe account reads + spread guard + sticky daily halt |
+| `logging/` folder shadowed Python's stdlib `logging` | Renamed to `loggers/` |
+
+Verified by **65 automated checks**: `python tests/test_willam.py`
+
 ## Features
 
 ### 🎯 News-Aware Trading
@@ -140,6 +157,29 @@ The evolution engine:
 4. Culls strategies that fail survival threshold (>50% expectancy)
 5. Adapts by filling gaps with new variants
 6. Never stops learning - each trade makes it smarter
+
+## Testing
+
+No MT5 terminal or API keys required — the suite mocks MT5 and uses synthetic OHLC data:
+
+```bash
+python tests/test_willam.py
+```
+
+Covers: imports/namespace shadowing, news parsing (real schema + timezone), per-symbol news gating,
+surprise classification, JEV hard gates, LLM→rules fallback, risk sizing, cross-asset PnL,
+the evolution psychology loop, trade logging, and all 7 strategy backtests.
+
+## Environment keys (optional)
+
+Copy `.env.example` to `.env`:
+
+```bash
+NVIDIA_API_KEY=      # primary JEV model (nemotron)
+FREELLMAPI_KEY=      # fallback JEV model
+```
+
+Without keys the bot runs on deterministic rules only — **it never stops trading because an LLM is down.**
 
 ## Disclaimer
 

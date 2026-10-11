@@ -81,10 +81,14 @@ evolution:
   profit_per_trade_target: 0.001     # Target expectancy per trade (0.1%)
 
 jev:
-  model: "nemotron-3-ultra"
-  fallback_model: "free-llm-api"
+  # Provider keys must match PROVIDERS in jev/engine.py
+  model: "nemotron"            # primary: NVIDIA NIM (set NVIDIA_API_KEY)
+  fallback_model: "free-llm-api"  # fallback: FreeLLMAPI (set FREELLMAPI_KEY)
   confidence_threshold: 0.7
   max_reasoning_steps: 5
+  llm_cooldown_minutes: 10     # pause a failing provider before retrying
+  # If neither API key is set the engine runs on deterministic rules only.
+  # It NEVER blocks trading just because an LLM is unreachable.
 
 logging:
   level: "INFO"
